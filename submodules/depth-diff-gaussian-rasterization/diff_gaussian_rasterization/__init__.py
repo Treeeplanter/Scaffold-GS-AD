@@ -232,7 +232,7 @@ class GaussianRasterizer(nn.Module):
 
         # Invoke C++/CUDA rasterization routine
         with torch.no_grad():
-            radii = _C.rasterize_aussians_filter(means3D,
+            radii = _C.rasterize_gaussians_filter(means3D,
             scales,
             rotations,
             raster_settings.scale_modifier,

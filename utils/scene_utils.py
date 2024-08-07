@@ -30,24 +30,27 @@ def save_log(image,gt_image,depth,gt_depth,iteration,model_path,time_now):
     gt_depth = gt_depth.permute(1,2,0).cpu().numpy()
     mask = gt_depth > 0
     mask = np.squeeze(mask)
-    depth_np = (depth_np - np.min(depth_np)) / (np.max(depth_np) - np.min(depth_np)) * 255
-    gt_depth = (gt_depth - np.min(gt_depth)) / (np.max(gt_depth) - np.min(gt_depth)) * 255
+    depth_np = (depth_np - np.min(depth_np)) / (np.max(depth_np) - np.min(depth_np))*255
+    gt_depth = (gt_depth - np.min(gt_depth)) / (np.max(gt_depth) - np.min(gt_depth))*255
 
-   
     np_gt_depth_map = cv2.applyColorMap(cv2.convertScaleAbs(gt_depth, alpha=1.0), cv2.COLORMAP_JET)
+    np_depth_map = cv2.applyColorMap(cv2.convertScaleAbs(depth_np, alpha=1.0), cv2.COLORMAP_JET)
     np_gt_depth_map[~mask] = [255, 255, 255]
-    image_with_depth = gt_image.permute(1,2,0).cpu().numpy()
+    image_with_depth = gt_image.permute(1,2,0).cpu().numpy()*255
     image_with_depth[mask] = np_gt_depth_map[mask]
 
-    color_map = plt.get_cmap('jet')  # 'jet' 是一种常见的彩色映射，你也可以选择其他的
-    np_depth_map = color_map(depth_np).squeeze(2)[:, :, :3]
-    np_depth_map = depth_np.repeat(3, axis=2)
+    # # color_map = plt.get_cmap('jet')  # 'jet' 是一种常见的彩色映射，你也可以选择其他的
+    # # # np_depth_map = color_map(depth_np).squeeze(2)[:, :, :3]
 
-    image_np_rgb = np.concatenate((gt_np, image_np), axis=1)
+    # np_depth_map = depth_np.repeat(3, axis=2)
+    # np_gt_depth_map = gt_depth.repeat(3, axis=2)
+
+    image_np_rgb = np.concatenate((gt_np, image_np), axis=1)*255
     depth_np_rgb = np.concatenate((image_with_depth, np_depth_map), axis=1)
     all_image = np.concatenate((image_np_rgb, depth_np_rgb), axis=0)
 
-    image_with_labels = Image.fromarray((np.clip(all_image,0,1) * 255).astype('uint8'))  # 转换为8位图像
+    image_with_labels = Image.fromarray(all_image.astype('uint8'))  # 转换为8位图像
+    
     draw1 = ImageDraw.Draw(image_with_labels)
     font = ImageFont.truetype('./utils/TIMES.TTF', size=40)  # 请将路径替换为您选择的字体文件路径
     text_color = (255, 0, 0)  # 白色

@@ -137,7 +137,7 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
         if (iteration - 1) == debug_from:
             pipe.debug = True
         
-        voxel_visible_mask = None#prefilter_voxel(viewpoint_cam, gaussians, pipe,background)
+        voxel_visible_mask = prefilter_voxel(viewpoint_cam, gaussians, pipe,background)
         retain_grad = (iteration < opt.update_until and iteration >= 0)
         render_pkg = render(viewpoint_cam, gaussians, pipe, background, visible_mask=voxel_visible_mask, retain_grad=retain_grad)
         
@@ -153,6 +153,10 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
         gt_depth = viewpoint_cam.depth_map.to(dtype = torch.float32, device = "cuda")
         depth_loss = compute_depth("l2", depth_pred, gt_depth) * opt.lambda_depth
         depth_loss = depth_loss.to(dtype = torch.float32)
+        path1 = os.path.join(dataset.model_path, "gt_depth.pth")
+        path2 = os.path.join(dataset.model_path, "pred_depth.pth")
+        torch.save(gt_depth, path1)
+        torch.save(depth_pred, path2)
 
         
         loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * ssim_loss + 0.01*scaling_reg + depth_loss
@@ -181,8 +185,9 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
             if (iteration < 10000 and iteration % 1000 == 999) \
                 or (iteration < 30000 and iteration % 2000 == 1999) \
                     or (iteration < 60000 and iteration %  3000 == 2999) \
-                        or iteration == 100:
+                        or iteration == 10:
                     save_log(image,gt_image,depth_pred, gt_depth, iteration,scene.model_path,timer.get_elapsed_time())
+
                     # render_training_image(scene, gaussians, [train_cams[round(len(train_cams)/2)]], render, pipe, background, iteration,timer.get_elapsed_time())
                     # if dataset.render_nvs:
                     #     phase=dataset.nvs_phase
