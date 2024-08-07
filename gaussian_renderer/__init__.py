@@ -38,7 +38,7 @@ def generate_neural_gaussians(viewpoint_camera, pc : GaussianModel, visible_mask
         
         bank_weight = pc.get_featurebank_mlp(cat_view).unsqueeze(dim=1) # [n, 1, 3]
 
-        ## multi-resolution feat
+        ## multi-resolution feat,论文附录中有解释，切片+复制操作
         feat = feat.unsqueeze(dim=-1)
         feat = feat[:,::4, :1].repeat([1,4,1])*bank_weight[:,:,:1] + \
             feat[:,::2, :1].repeat([1,2,1])*bank_weight[:,:,1:2] + \
@@ -48,12 +48,15 @@ def generate_neural_gaussians(viewpoint_camera, pc : GaussianModel, visible_mask
 
     cat_local_view = torch.cat([feat, ob_view, ob_dist], dim=1) # [N, c+3+1]
     cat_local_view_wodist = torch.cat([feat, ob_view], dim=1) # [N, c+3]
-    if pc.appearance_dim > 0:
+
+    if pc.appearance_dim > 0:#
         camera_indicies = torch.ones_like(cat_local_view[:,0], dtype=torch.long, device=ob_dist.device) * viewpoint_camera.uid
         # camera_indicies = torch.ones_like(cat_local_view[:,0], dtype=torch.long, device=ob_dist.device) * 10
         appearance = pc.get_appearance(camera_indicies)
 
     # get offset's opacity
+    # if pc.featonly:
+    #     neural_opacity = pc.get_opacity_mlp(feat)
     if pc.add_opacity_dist:
         neural_opacity = pc.get_opacity_mlp(cat_local_view) # [N, k]
     else:
@@ -68,7 +71,7 @@ def generate_neural_gaussians(viewpoint_camera, pc : GaussianModel, visible_mask
     opacity = neural_opacity[mask]
 
     # get offset's color
-    if pc.appearance_dim > 0:
+    if pc.appearance_dim > 0:#32
         if pc.add_color_dist:
             color = pc.get_color_mlp(torch.cat([cat_local_view, appearance], dim=1))
         else:
@@ -155,7 +158,7 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
     rasterizer = GaussianRasterizer(raster_settings=raster_settings)
     
     # Rasterize visible Gaussians to image, obtain their radii (on screen). 
-    rendered_image, radii = rasterizer(
+    rendered_image, radii, depth = rasterizer(
         means3D = xyz,
         means2D = screenspace_points,
         shs = None,
@@ -168,6 +171,7 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
     # Those Gaussians that were frustum culled or had a radius of 0 were not visible.
     if is_training:
         return {"render": rendered_image,
+                "depth": depth,
                 "viewspace_points": screenspace_points,
                 "visibility_filter" : radii > 0,
                 "radii": radii,
@@ -177,6 +181,7 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
                 }
     else:
         return {"render": rendered_image,
+                "depth": depth,
                 "viewspace_points": screenspace_points,
                 "visibility_filter" : radii > 0,
                 "radii": radii,

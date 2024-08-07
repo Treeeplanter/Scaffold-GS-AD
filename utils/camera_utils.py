@@ -11,8 +11,9 @@
 
 from scene.cameras import Camera
 import numpy as np
-from utils.general_utils import PILtoTorch
+from utils.general_utils import PILtoTorch, DepthMaptoTorch, ObjectPILtoTorch
 from utils.graphics_utils import fov2focal
+import torch 
 
 WARNED = False
 
@@ -43,14 +44,59 @@ def loadCam(args, id, cam_info, resolution_scale):
     gt_image = resized_image_rgb[:3, ...]
     loaded_mask = None
 
-    # print(f'gt_image: {gt_image.shape}')
     if resized_image_rgb.shape[1] == 4:
         loaded_mask = resized_image_rgb[3:4, ...]
 
+    # for waymo
+    sky_mask = None
+    if cam_info.sky_mask is not None:
+        sky_mask = PILtoTorch(cam_info.sky_mask, resolution)
+    depth_map = None
+    if cam_info.depth_map is not None:
+        # print("depth.max,detph.min before camera:", np.max(cam_info.depth_map), np.min(cam_info.depth_map))
+        depth_map = DepthMaptoTorch(cam_info.depth_map)
+        # print("depth.max,detph.min after camera:", depth_map.max(), depth_map.min())
+    semantic_mask = None
+    if cam_info.semantic_mask is not None:
+        semantic_mask = ObjectPILtoTorch(cam_info.semantic_mask, resolution)
+    instance_mask = None
+    if cam_info.instance_mask is not None:
+        instance_mask = ObjectPILtoTorch(cam_info.instance_mask, resolution)
+    sam_mask = None
+    if cam_info.sam_mask is not None:
+        sam_mask = ObjectPILtoTorch(cam_info.sam_mask, resolution)
+    feat_map = None
+    if cam_info.feat_map is not None:
+        feat_map = cam_info.feat_map
+    dynamic_mask = None
+    if cam_info.dynamic_mask is not None:
+        dynamic_mask = ObjectPILtoTorch(cam_info.dynamic_mask, resolution)
+    intrinsic = None
+    if cam_info.intrinsic is not None:
+        intrinsic = torch.from_numpy(cam_info.intrinsic).to(dtype=torch.float32)
+    c2w = None
+    if cam_info.c2w is not None:
+        c2w = torch.from_numpy(cam_info.c2w).to(dtype=torch.float32)
+    lidar_to_world = None
+    if cam_info.lidar_to_world is not None:
+        lidar_to_world = torch.from_numpy(cam_info.lidar_to_world).to(dtype=torch.float32)
     return Camera(colmap_id=cam_info.uid, R=cam_info.R, T=cam_info.T, 
                   FoVx=cam_info.FovX, FoVy=cam_info.FovY, 
                   image=gt_image, gt_alpha_mask=loaded_mask,
-                  image_name=cam_info.image_name, uid=id, data_device=args.data_device)
+                  image_name=cam_info.image_name, uid=id, data_device=args.data_device, file_path=cam_info.image_path,
+                  # for waymo
+                  sky_mask = sky_mask, depth_map = depth_map,
+                  semantic_mask = semantic_mask, instance_mask = instance_mask,
+                  sam_mask = sam_mask,
+                  dynamic_mask = dynamic_mask,
+                  feat_map = feat_map,
+                  objects=torch.from_numpy(np.array(cam_info.objects)) if cam_info.objects is not None else None,
+                  intrinsic = intrinsic, 
+                  c2w = c2w,
+                  #time = cam_info.time,
+                  lidar_to_world = lidar_to_world
+                  )
+
 
 def cameraList_from_camInfos(cam_infos, resolution_scale, args):
     camera_list = []

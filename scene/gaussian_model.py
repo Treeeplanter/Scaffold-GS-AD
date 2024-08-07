@@ -47,7 +47,7 @@ class GaussianModel:
     def __init__(self, 
                  feat_dim: int=32, 
                  n_offsets: int=5, 
-                 voxel_size: float=0.01,
+                 voxel_size: float=0.05,
                  update_depth: int=3, 
                  update_init_factor: int=100,
                  update_hierachy_factor: int=4,
@@ -253,7 +253,7 @@ class GaussianModel:
         offsets = torch.zeros((fused_point_cloud.shape[0], self.n_offsets, 3)).float().cuda()
         anchors_feat = torch.zeros((fused_point_cloud.shape[0], self.feat_dim)).float().cuda()
         
-        print("Number of points at initialisation : ", fused_point_cloud.shape[0])
+        print("Number of anchors at initialisation : ", fused_point_cloud.shape[0])
 
         dist2 = torch.clamp_min(distCUDA2(fused_point_cloud).float().cuda(), 0.0000001)
         scales = torch.log(torch.sqrt(dist2))[...,None].repeat(1, 6)

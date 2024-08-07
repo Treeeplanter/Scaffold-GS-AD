@@ -13,6 +13,35 @@ import torch
 import torch.nn.functional as F
 from torch.autograd import Variable
 from math import exp
+from torch import Tensor
+
+### depth loss ###
+def normalize_depth(depth: Tensor, max_depth: float = 80.0):
+    return torch.clamp(depth / max_depth, 0.0, 1.0)
+
+def compute_depth(
+    loss_type,
+    pred_depth: Tensor,
+    gt_depth: Tensor,
+    max_depth: float = 80,
+):
+    pred_depth = pred_depth.squeeze()
+    gt_depth = gt_depth.squeeze()
+    valid_mask = (gt_depth > 0.01) & (gt_depth < max_depth)
+    pred_depth = normalize_depth(pred_depth[valid_mask], max_depth=max_depth)
+    gt_depth = normalize_depth(gt_depth[valid_mask], max_depth=max_depth)#归一化后计算损失
+    if loss_type == "smooth_l1":
+        loss =  F.smooth_l1_loss(pred_depth, gt_depth, reduction="none")
+        return loss.mean()
+    elif loss_type == "l1":
+        loss = F.l1_loss(pred_depth, gt_depth, reduction="none")
+        return loss.mean()
+    elif loss_type == "l2":
+        loss = F.mse_loss(pred_depth, gt_depth, reduction="none")
+        return loss.mean()
+    else:
+        raise NotImplementedError(f"Unknown loss type: {loss_type}")
+    
 
 def l1_loss(network_output, gt):
     return torch.abs((network_output - gt)).mean()
@@ -62,3 +91,4 @@ def _ssim(img1, img2, window, window_size, channel, size_average=True):
     else:
         return ssim_map.mean(1).mean(1).mean(1)
 
+ 

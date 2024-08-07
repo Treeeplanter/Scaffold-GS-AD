@@ -14,9 +14,81 @@ import sys
 from datetime import datetime
 import numpy as np
 import random
+def sample_on_aabb_surface(aabb_center, aabb_size, n_pts=1000, above_half=False):
+    """
+    0:立方体的左面(x轴负方向)
+    1:立方体的右面(x轴正方向)
+    2:立方体的下面(y轴负方向)
+    3:立方体的上面(y轴正方向)
+    4:立方体的后面(z轴负方向)
+    5:立方体的前面(z轴正方向)
+    """
+    # Choose a face randomly
+    faces = np.random.randint(0, 6, size=n_pts)
 
+    # Generate two random numbers
+    r_ = np.random.random((n_pts, 2))
+
+    # Create an array to store the points
+    points = np.zeros((n_pts, 3))
+
+    # Define the offsets for each face
+    offsets = np.array([
+        [-aabb_size[0]/2, 0, 0],
+        [aabb_size[0]/2, 0, 0],
+        [0, -aabb_size[1]/2, 0],
+        [0, aabb_size[1]/2, 0],
+        [0, 0, -aabb_size[2]/2],
+        [0, 0, aabb_size[2]/2]
+    ])
+
+    # Define the scales for each face
+    scales = np.array([
+        [aabb_size[1], aabb_size[2]],
+        [aabb_size[1], aabb_size[2]],
+        [aabb_size[0], aabb_size[2]],
+        [aabb_size[0], aabb_size[2]],
+        [aabb_size[0], aabb_size[1]],
+        [aabb_size[0], aabb_size[1]]
+    ])
+
+    # Define the positions of the zero column for each face
+    zero_column_positions = [0, 0, 1, 1, 2, 2]
+    # Define the indices of the aabb_size components for each face
+    aabb_size_indices = [[1, 2], [1, 2], [0, 2], [0, 2], [0, 1], [0, 1]]
+    # Calculate the coordinates of the points for each face
+    for i in range(6):
+        mask = faces == i
+        r_scaled = r_[mask] * scales[i]
+        r_scaled = np.insert(r_scaled, zero_column_positions[i], 0, axis=1)
+        aabb_size_adjusted = np.insert(aabb_size[aabb_size_indices[i]] / 2, zero_column_positions[i], 0)
+        points[mask] = aabb_center + offsets[i] + r_scaled - aabb_size_adjusted
+        #visualize_points(points[mask], aabb_center, aabb_size)
+    #visualize_points(points, aabb_center, aabb_size)
+        
+    # 提取上半部分的点
+    if above_half:
+        points = points[points[:, -1] > aabb_center[-1]]
+    return points
 def inverse_sigmoid(x):
     return torch.log(x/(1-x))
+
+def DepthMaptoTorch(depth_map):
+    resized_image = torch.from_numpy(depth_map) #/ 255.0
+    if len(resized_image.shape) == 3:
+        return resized_image.permute(2, 0, 1)
+    else:
+        return resized_image.unsqueeze(dim=-1).permute(2, 0, 1)
+def ObjectPILtoTorch(pil_image, resolution):
+    resized_image_PIL = pil_image.resize(resolution)
+    resized_image = torch.from_numpy(np.array(resized_image_PIL)) 
+    #max_val = resized_image.max()
+    #if max_val > 0:
+    #    resized_image = resized_image / max_val
+    if len(resized_image.shape) == 3:
+        return resized_image.permute(2, 0, 1)
+    else:
+        return resized_image.unsqueeze(dim=-1).permute(2, 0, 1)
 
 def PILtoTorch(pil_image, resolution):
     resized_image_PIL = pil_image.resize(resolution)

@@ -49,7 +49,7 @@ class ModelParams(ParamGroup):
         self.sh_degree = 3
         self.feat_dim = 32
         self.n_offsets = 10
-        self.voxel_size =  0.001 # if voxel_size<=0, using 1nn dist
+        self.voxel_size =  0.05 # if voxel_size<=0, using 1nn dist
         self.update_depth = 3
         self.update_init_factor = 16
         self.update_hierachy_factor = 4
@@ -75,6 +75,15 @@ class ModelParams(ParamGroup):
         self.add_opacity_dist = False
         self.add_cov_dist = False
         self.add_color_dist = False
+
+
+        # waymo
+        self.start_time = 120 # now hard-coded 081:80-110, 036:45-90 019：0-30
+        self.end_time = 170
+        self.read_freq = 1
+        self.num_pts = 1500000 
+        self.load_intrinsic = True
+        self.load_c2w = True
         
         super().__init__(parser, "Loading Parameters", sentinel)
 
@@ -141,6 +150,7 @@ class OptimizationParams(ParamGroup):
 
         self.percent_dense = 0.01
         self.lambda_dssim = 0.2
+        self.lambda_depth = 0.5
         
         # for anchor densification
         self.start_stat = 500

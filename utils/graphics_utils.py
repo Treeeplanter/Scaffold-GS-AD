@@ -18,6 +18,12 @@ class BasicPointCloud(NamedTuple):
     points : np.array
     colors : np.array
     normals : np.array
+    def fuse(self, other):
+        return BasicPointCloud(
+            points = np.concatenate([self.points, other.points], axis=0),
+            colors = np.concatenate([self.colors, other.colors], axis=0),
+            normals = np.concatenate([self.normals, other.normals], axis=0),
+        )
 
 def geom_transform_points(points, transf_matrix):
     P, _ = points.shape

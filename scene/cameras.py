@@ -17,7 +17,14 @@ from utils.graphics_utils import getWorld2View2, getProjectionMatrix
 class Camera(nn.Module):
     def __init__(self, colmap_id, R, T, FoVx, FoVy, image, gt_alpha_mask,
                  image_name, uid,
-                 trans=np.array([0.0, 0.0, 0.0]), scale=1.0, data_device = "cuda"
+                 trans=np.array([0.0, 0.0, 0.0]), scale=1.0, data_device = "cuda",
+                 file_path = None,
+                 # for waymo
+                 sky_mask = None, depth_map = None, semantic_mask = None, instance_mask = None,
+                 num_panoptic_objects = 0,
+                 sam_mask = None, dynamic_mask = None, feat_map = None, objects = None, intrinsic = None, c2w = None, 
+                 time = None,
+                 lidar_to_world = None
                  ):
         super(Camera, self).__init__()
 
@@ -28,7 +35,8 @@ class Camera(nn.Module):
         self.FoVx = FoVx
         self.FoVy = FoVy
         self.image_name = image_name
-
+        self.time = time
+        self.file_path = file_path
         try:
             self.data_device = torch.device(data_device)
         except Exception as e:
@@ -50,12 +58,28 @@ class Camera(nn.Module):
 
         self.trans = trans
         self.scale = scale
-
+        #TODO: render中传入的相机参数是这两个：world_view_transform，full_proj_transform
+        # w2c： waymo_world --> opencv_cam 
         self.world_view_transform = torch.tensor(getWorld2View2(R, T, trans, scale)).transpose(0, 1).cuda()
+        # proj : opencv_cam to 0-1-NDC
         self.projection_matrix = getProjectionMatrix(znear=self.znear, zfar=self.zfar, fovX=self.FoVx, fovY=self.FoVy).transpose(0,1).cuda()
+        # w2c + c2pixel : X_world * full_proj_transform = pixel
         self.full_proj_transform = (self.world_view_transform.unsqueeze(0).bmm(self.projection_matrix.unsqueeze(0))).squeeze(0)
         self.camera_center = self.world_view_transform.inverse()[3, :3]
-
+        # for waymo
+        self.sky_mask = sky_mask
+        self.depth_map = depth_map
+        self.semantic_mask = semantic_mask
+        self.instance_mask = instance_mask
+        self.num_panoptic_objects = num_panoptic_objects
+        self.sam_mask = sam_mask
+        self.dynamic_mask = dynamic_mask
+        self.feat_map = feat_map
+        # grouping
+        self.objects = objects
+        self.intrinsic = intrinsic
+        self.c2w = c2w
+        self.lidar_to_world = lidar_to_world
 class MiniCam:
     def __init__(self, width, height, fovy, fovx, znear, zfar, world_view_transform, full_proj_transform):
         self.image_width = width

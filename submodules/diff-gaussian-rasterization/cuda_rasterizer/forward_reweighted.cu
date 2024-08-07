@@ -253,7 +253,7 @@ __global__ void preprocessCUDA(int P, int D, int M,
 	radii[idx] = my_radius;
 	points_xy_image[idx] = point_image;
 	// Inverse 2D covariance and opacity neatly pack into one float4
-	// conic_opacity[idx] = { conic.x, conic.y, conic.z, opacities[idx]};
+	// conic_opacity[idx] = { conic.x, conic.y, conic.z, opacities[idx] };
 
 	// modified by lt
 	float det_bias = ((cov.x+0.1001) * (cov.z+0.1001) - cov.y * cov.y);
@@ -352,6 +352,7 @@ renderCUDA(
 	int W, int H,
 	const float2* __restrict__ points_xy_image,
 	const float* __restrict__ features,
+	const float* __restrict__ depths,
 	const float4* __restrict__ conic_opacity,
 	float* __restrict__ final_T,
 	uint32_t* __restrict__ n_contrib,

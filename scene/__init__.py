@@ -46,18 +46,31 @@ class Scene:
         elif os.path.exists(os.path.join(args.source_path, "transforms_train.json")):
             print("Found transforms_train.json file, assuming Blender data set!")
             scene_info = sceneLoadTypeCallbacks["Blender"](args.source_path, args.white_background, args.eval, ply_path=ply_path)
+        elif os.path.exists(os.path.join(args.source_path,"frame_info.json")):
+            print("Found frame_info.json file, assuming Waymo data set!")
+            scene_info = sceneLoadTypeCallbacks["Waymo"](args.source_path, self.model_path, args.white_background, args.eval,
+                                    use_bg_gs=True,
+                                    load_intrinsic = args.load_intrinsic, #False,
+                                    load_c2w = args.load_c2w, #False,
+                                    start_time = args.start_time, #0,
+                                    end_time = args.end_time, # 100,
+                                    read_freq = args.read_freq,
+                                    num_pts = args.num_pts,
+                                    )
+            dataset_type="waymo"
         else:
             assert False, "Could not recognize scene type!"
+        
 
         self.gaussians.set_appearance(len(scene_info.train_cameras))
         
         if not self.loaded_iter:
-            if ply_path is not None:
-                with open(ply_path, 'rb') as src_file, open(os.path.join(self.model_path, "input.ply") , 'wb') as dest_file:
-                    dest_file.write(src_file.read())
-            else:
-                with open(scene_info.ply_path, 'rb') as src_file, open(os.path.join(self.model_path, "input.ply") , 'wb') as dest_file:
-                    dest_file.write(src_file.read())
+            # if ply_path is not None:
+            #     with open(ply_path, 'rb') as src_file, open(os.path.join(self.model_path, "input.ply") , 'wb') as dest_file:
+            #         dest_file.write(src_file.read())
+            # else:
+            #     with open(scene_info.ply_path, 'rb') as src_file, open(os.path.join(self.model_path, "input.ply") , 'wb') as dest_file:
+            #         dest_file.write(src_file.read())
             json_cams = []
             camlist = []
             if scene_info.test_cameras:

@@ -11,7 +11,6 @@
 
 import os
 import numpy as np
-
 import subprocess
 cmd = 'nvidia-smi -q -d Memory |grep -A4 GPU|grep Used'
 result = subprocess.run(cmd, shell=True, stdout=subprocess.PIPE).stdout.decode().split('\n')
@@ -23,7 +22,6 @@ os.system('echo $CUDA_VISIBLE_DEVICES')
 import torch
 import torchvision
 import json
-import wandb
 import time
 from os import makedirs
 import shutil, pathlib
@@ -31,9 +29,9 @@ from pathlib import Path
 from PIL import Image
 import torchvision.transforms.functional as tf
 # from lpipsPyTorch import lpips
-import lpips
+#import lpips
 from random import randint
-from utils.loss_utils import l1_loss, ssim
+from utils.loss_utils import l1_loss, ssim, compute_depth
 from gaussian_renderer import prefilter_voxel, render, network_gui
 import sys
 from scene import Scene, GaussianModel
@@ -41,11 +39,14 @@ from utils.general_utils import safe_state
 import uuid
 from tqdm import tqdm
 from utils.image_utils import psnr
+from utils.scene_utils import render_training_image, save_log
+from utils.timer import Timer
 from argparse import ArgumentParser, Namespace
 from arguments import ModelParams, PipelineParams, OptimizationParams
 
+
 # torch.set_num_threads(32)
-lpips_fn = lpips.LPIPS(net='vgg').to('cuda')
+# lpips_fn = lpips.LPIPS(net='vgg').to('cuda')
 
 try:
     from torch.utils.tensorboard import SummaryWriter
@@ -79,7 +80,7 @@ def saveRuntimeCode(dst: str) -> None:
     print('Backup Finished!')
 
 
-def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from, wandb=None, logger=None, ply_path=None):
+def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from, ply_path=None):
     first_iter = 0
     tb_writer = prepare_output_and_logger(dataset)
     gaussians = GaussianModel(dataset.feat_dim, dataset.n_offsets, dataset.voxel_size, dataset.update_depth, dataset.update_init_factor, dataset.update_hierachy_factor, dataset.use_feat_bank, 
@@ -97,8 +98,11 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
     ema_loss_for_log = 0.0
     progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
     first_iter += 1
+    timer = Timer()
+    timer.start()
     for iteration in range(first_iter, opt.iterations + 1):        
         # network gui not available in scaffold-gs yet
+        """
         if network_gui.conn == None:
             network_gui.try_connect()
         while network_gui.conn != None:
@@ -113,6 +117,8 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
                     break
             except Exception as e:
                 network_gui.conn = None
+        """
+
 
         iter_start.record()
 
@@ -121,28 +127,35 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
         bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
         background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
 
-        
+        train_cams = scene.getTrainCameras()
         # Pick a random Camera
         if not viewpoint_stack:
-            viewpoint_stack = scene.getTrainCameras().copy()
+            viewpoint_stack = train_cams.copy()
         viewpoint_cam = viewpoint_stack.pop(randint(0, len(viewpoint_stack)-1))
 
         # Render
         if (iteration - 1) == debug_from:
             pipe.debug = True
         
-        voxel_visible_mask = prefilter_voxel(viewpoint_cam, gaussians, pipe,background)
+        voxel_visible_mask = None#prefilter_voxel(viewpoint_cam, gaussians, pipe,background)
         retain_grad = (iteration < opt.update_until and iteration >= 0)
         render_pkg = render(viewpoint_cam, gaussians, pipe, background, visible_mask=voxel_visible_mask, retain_grad=retain_grad)
         
-        image, viewspace_point_tensor, visibility_filter, offset_selection_mask, radii, scaling, opacity = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["selection_mask"], render_pkg["radii"], render_pkg["scaling"], render_pkg["neural_opacity"]
+        image, depth_pred, viewspace_point_tensor, visibility_filter, offset_selection_mask, radii, scaling, opacity = render_pkg["render"], render_pkg["depth"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["selection_mask"], render_pkg["radii"], render_pkg["scaling"], render_pkg["neural_opacity"]
 
         gt_image = viewpoint_cam.original_image.cuda()
         Ll1 = l1_loss(image, gt_image)
 
         ssim_loss = (1.0 - ssim(image, gt_image))
+       
         scaling_reg = scaling.prod(dim=1).mean()
-        loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * ssim_loss + 0.01*scaling_reg
+
+        gt_depth = viewpoint_cam.depth_map.to(dtype = torch.float32, device = "cuda")
+        depth_loss = compute_depth("l2", depth_pred, gt_depth) * opt.lambda_depth
+        depth_loss = depth_loss.to(dtype = torch.float32)
+
+        
+        loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * ssim_loss + 0.01*scaling_reg + depth_loss
 
         loss.backward()
         
@@ -159,10 +172,26 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
                 progress_bar.close()
 
             # Log and save
-            training_report(tb_writer, dataset_name, iteration, Ll1, loss, l1_loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, (pipe, background), wandb, logger)
-            if (iteration in saving_iterations):
-                logger.info("\n[ITER {}] Saving Gaussians".format(iteration))
+            timer.pause()
+            # training_report(tb_writer, iteration, Ll1, loss, l1_loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, [pipe, background], stage)
+            if (iteration == opt.iterations):
+                print("\n[ITER {}] Saving Gaussians".format(iteration))
                 scene.save(iteration)
+                
+            if (iteration < 10000 and iteration % 1000 == 999) \
+                or (iteration < 30000 and iteration % 2000 == 1999) \
+                    or (iteration < 60000 and iteration %  3000 == 2999) \
+                        or iteration == 100:
+                    save_log(image,gt_image,depth_pred, gt_depth, iteration,scene.model_path,timer.get_elapsed_time())
+                    # render_training_image(scene, gaussians, [train_cams[round(len(train_cams)/2)]], render, pipe, background, iteration,timer.get_elapsed_time())
+                    # if dataset.render_nvs:
+                    #     phase=dataset.nvs_phase
+                    #     nvs_viewpoints=random_change_view(ori_views=[train_cams[round(len(train_cams)/2)]], phase=phase)
+                    #     render_training_image(scene, gaussians, nvs_viewpoints, render, pipe, background, stage+"_nvs_"+str(phase), iteration,timer.get_elapsed_time())
+
+                # total_images.append(to8b(temp_image).transpose(1,2,0))
+            timer.start()
+
             
             # densification
             if iteration < opt.update_until and iteration > opt.start_stat:
@@ -183,7 +212,7 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
                 gaussians.optimizer.step()
                 gaussians.optimizer.zero_grad(set_to_none = True)
             if (iteration in checkpoint_iterations):
-                logger.info("\n[ITER {}] Saving Checkpoint".format(iteration))
+                # logger.info("\n[ITER {}] Saving Checkpoint".format(iteration))
                 torch.save((gaussians.capture(), iteration), scene.model_path + "/chkpnt" + str(iteration) + ".pth")
 
 def prepare_output_and_logger(args):    
@@ -458,6 +487,7 @@ if __name__ == "__main__":
     lp = ModelParams(parser)
     op = OptimizationParams(parser)
     pp = PipelineParams(parser)
+
     parser.add_argument('--ip', type=str, default="127.0.0.1")
     parser.add_argument('--port', type=int, default=6009)
     parser.add_argument('--debug_from', type=int, default=-1)
@@ -472,6 +502,12 @@ if __name__ == "__main__":
     parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[])
     parser.add_argument("--start_checkpoint", type=str, default = None)
     parser.add_argument("--gpu", type=str, default = '-1')
+    parser.add_argument("--expname", type=str, default = "waymo")
+    parser.add_argument("--configs", type=str, default = "")
+    parser.add_argument("--eval_only", action="store_true", help="perform evaluation only")
+    parser.add_argument("--prior_checkpoint", type=str, default = None)
+    parser.add_argument("--merge", action="store_true", help="merge gaussians")
+
     args = parser.parse_args(sys.argv[1:])
     args.save_iterations.append(args.iterations)
 
@@ -481,64 +517,63 @@ if __name__ == "__main__":
     model_path = args.model_path
     os.makedirs(model_path, exist_ok=True)
 
-    logger = get_logger(model_path)
+    # logger = get_logger(model_path)
+    # logger.info(f'args: {args}')
 
+    # if args.gpu != '-1':
+    #     os.environ['CUDA_VISIBLE_DEVICES'] = str(args.gpu)
+    #     os.system("echo $CUDA_VISIBLE_DEVICES")
+    #     logger.info(f'using GPU {args.gpu}')
 
-    logger.info(f'args: {args}')
-
-    if args.gpu != '-1':
-        os.environ['CUDA_VISIBLE_DEVICES'] = str(args.gpu)
-        os.system("echo $CUDA_VISIBLE_DEVICES")
-        logger.info(f'using GPU {args.gpu}')
-
-    
-
-    try:
-        saveRuntimeCode(os.path.join(args.model_path, 'backup'))
-    except:
-        logger.info(f'save code failed~')
+    # try:
+    #     saveRuntimeCode(os.path.join(args.model_path, 'backup'))
+    # except:
+    #     logger.info(f'save code failed~')
         
     dataset = args.source_path.split('/')[-1]
     exp_name = args.model_path.split('/')[-2]
     
-    if args.use_wandb:
-        wandb.login()
-        run = wandb.init(
-            # Set the project where this run will be logged
-            project=f"Scaffold-GS-{dataset}",
-            name=exp_name,
-            # Track hyperparameters and run metadata
-            settings=wandb.Settings(start_method="fork"),
-            config=vars(args)
-        )
-    else:
-        wandb = None
+    # if args.use_wandb:
+    #     wandb.login()
+    #     run = wandb.init(
+    #         # Set the project where this run will be logged
+    #         project=f"Scaffold-GS-{dataset}",
+    #         name=exp_name,
+    #         # Track hyperparameters and run metadata
+    #         settings=wandb.Settings(start_method="fork"),
+    #         config=vars(args)
+    #     )
+    # else:
+    #     wandb = None
     
-    logger.info("Optimizing " + args.model_path)
+    # logger.info("Optimizing " + args.model_path)
 
     # Initialize system state (RNG)
     safe_state(args.quiet)
 
     # Start GUI server, configure and run training
-    network_gui.init(args.ip, args.port)
-    torch.autograd.set_detect_anomaly(args.detect_anomaly)
+    # network_gui.init(args.ip, args.port)
+    # torch.autograd.set_detect_anomaly(args.detect_anomaly)
     
     # training
-    training(lp.extract(args), op.extract(args), pp.extract(args), dataset,  args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.debug_from, wandb, logger)
-    if args.warmup:
-        logger.info("\n Warmup finished! Reboot from last checkpoints")
-        new_ply_path = os.path.join(args.model_path, f'point_cloud/iteration_{args.iterations}', 'point_cloud.ply')
-        training(lp.extract(args), op.extract(args), pp.extract(args), dataset,  args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.debug_from, wandb=wandb, logger=logger, ply_path=new_ply_path)
+    training(lp.extract(args), op.extract(args), pp.extract(args), dataset,  args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.debug_from)
+    print("\nTraining complete.")
+    # if args.warmup:
+    #     logger.info("\n Warmup finished! Reboot from last checkpoints")
+    #     new_ply_path = os.path.join(args.model_path, f'point_cloud/iteration_{args.iterations}', 'point_cloud.ply')
+    #     training(lp.extract(args), op.extract(args), pp.extract(args), dataset,  args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.debug_from, wandb=wandb, logger=logger, ply_path=new_ply_path)
 
-    # All done
-    logger.info("\nTraining complete.")
+    # # All done
+    # logger.info("\nTraining complete.")
 
-    # rendering
-    logger.info(f'\nStarting Rendering~')
-    visible_count = render_sets(lp.extract(args), -1, pp.extract(args), wandb=wandb, logger=logger)
-    logger.info("\nRendering complete.")
+    # # rendering
+    # logger.info(f'\nStarting Rendering~')
+    # visible_count = render_sets(lp.extract(args), -1, pp.extract(args), wandb=wandb, logger=logger)
+    # logger.info("\nRendering complete.")
 
-    # calc metrics
-    logger.info("\n Starting evaluation...")
-    evaluate(args.model_path, visible_count=visible_count, wandb=wandb, logger=logger)
-    logger.info("\nEvaluating complete.")
+    # # calc metrics
+    # logger.info("\n Starting evaluation...")
+    # evaluate(args.model_path, visible_count=visible_count, wandb=wandb, logger=logger)
+    # logger.info("\nEvaluating complete.")
+
+    
