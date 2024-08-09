@@ -39,7 +39,7 @@ from utils.general_utils import safe_state
 import uuid
 from tqdm import tqdm
 from utils.image_utils import psnr
-from utils.scene_utils import render_training_image, save_log
+from utils.scene_utils import render_training_image, save_log, render_nvs
 from utils.timer import Timer
 from argparse import ArgumentParser, Namespace
 from arguments import ModelParams, PipelineParams, OptimizationParams
@@ -100,6 +100,11 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
     first_iter += 1
     timer = Timer()
     timer.start()
+    loss_history = []
+    offset_loss = []
+    scaling_loss = []
+    offset_denom_curve = []
+    depth_loss_curve = []
     for iteration in range(first_iter, opt.iterations + 1):        
         # network gui not available in scaffold-gs yet
         """
@@ -141,7 +146,7 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
         retain_grad = (iteration < opt.update_until and iteration >= 0)
         render_pkg = render(viewpoint_cam, gaussians, pipe, background, visible_mask=voxel_visible_mask, retain_grad=retain_grad)
         
-        image, depth_pred, viewspace_point_tensor, visibility_filter, offset_selection_mask, radii, scaling, opacity = render_pkg["render"], render_pkg["depth"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["selection_mask"], render_pkg["radii"], render_pkg["scaling"], render_pkg["neural_opacity"]
+        image, depth_pred, viewspace_point_tensor, visibility_filter, offset_selection_mask, radii, scaling, opacity, offset= render_pkg["render"], render_pkg["depth"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["selection_mask"], render_pkg["radii"], render_pkg["scaling"], render_pkg["neural_opacity"],render_pkg["offset"]
 
         gt_image = viewpoint_cam.original_image.cuda()
         Ll1 = l1_loss(image, gt_image)
@@ -150,16 +155,19 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
        
         scaling_reg = scaling.prod(dim=1).mean()
 
+        offset_reg = offset.norm(dim=1).mean()
+
         gt_depth = viewpoint_cam.depth_map.to(dtype = torch.float32, device = "cuda")
         depth_loss = compute_depth("l2", depth_pred, gt_depth) * opt.lambda_depth
         depth_loss = depth_loss.to(dtype = torch.float32)
-        path1 = os.path.join(dataset.model_path, "gt_depth.pth")
-        path2 = os.path.join(dataset.model_path, "pred_depth.pth")
-        torch.save(gt_depth, path1)
-        torch.save(depth_pred, path2)
 
-        
-        loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * ssim_loss + 0.01*scaling_reg + depth_loss
+        loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * ssim_loss + 0.01*scaling_reg + depth_loss + offset_reg*opt.lambda_offset
+        loss_history.append(loss.item())
+        #offset_loss_max.append(offset.norm(dim=1).mean().item())
+        offset_loss.append(offset_reg.item())
+        scaling_loss.append(gaussians.get_scaling[:,:3].norm(dim=1).mean().item())
+        offset_denom_curve.append(gaussians.offset_denom.mean().item())
+        depth_loss_curve.append(depth_loss.item())
 
         loss.backward()
         
@@ -181,13 +189,28 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
             if (iteration == opt.iterations):
                 print("\n[ITER {}] Saving Gaussians".format(iteration))
                 scene.save(iteration)
+                import matplotlib.pyplot as plt
+                plt.figure()
+                plt.plot(loss_history,label='total_loss')
+                plt.plot(offset_loss,label='offset_loss')
+                #plt.plot(offset_loss_max)
+                plt.plot(scaling_loss,label='scaling_loss')
+                plt.plot(depth_loss_curve,label='depth_loss')
+                # plt.plot(offset_denom_curve)
+                plt.xlabel('Iteration')
+                plt.ylabel('Loss')
+                plt.title('Loss Curve')
+                plt.legend()
+                plt.savefig(os.path.join(scene.model_path,'loss_curve.png'))  # 保存图像到文件
+
+
                 
             if (iteration < 10000 and iteration % 1000 == 999) \
                 or (iteration < 30000 and iteration % 2000 == 1999) \
                     or (iteration < 60000 and iteration %  3000 == 2999) \
-                        or iteration == 10:
+                        or iteration == 1:
                     save_log(image,gt_image,depth_pred, gt_depth, iteration,scene.model_path,timer.get_elapsed_time())
-
+                    render_nvs(scene, gaussians, [train_cams[round(len(train_cams)/2)]], render, pipe, background, iteration, timer.get_elapsed_time())
                     # render_training_image(scene, gaussians, [train_cams[round(len(train_cams)/2)]], render, pipe, background, iteration,timer.get_elapsed_time())
                     # if dataset.render_nvs:
                     #     phase=dataset.nvs_phase
@@ -209,7 +232,7 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
             elif iteration == opt.update_until:
                 del gaussians.opacity_accum
                 del gaussians.offset_gradient_accum
-                del gaussians.offset_denom
+                #del gaussians.offset_denom
                 torch.cuda.empty_cache()
                     
             # Optimizer step

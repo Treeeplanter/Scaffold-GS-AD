@@ -14,7 +14,7 @@ import sys
 from datetime import datetime
 import numpy as np
 import random
-def sample_on_aabb_surface(aabb_center, aabb_size, n_pts=1000, above_half=False):
+def sample_on_aabb_surface(aabb_center, aabb_size, n_pts=1000, above_half=True):
     """
     0:立方体的左面(x轴负方向)
     1:立方体的右面(x轴正方向)
@@ -24,8 +24,8 @@ def sample_on_aabb_surface(aabb_center, aabb_size, n_pts=1000, above_half=False)
     5:立方体的前面(z轴正方向)
     """
     # Choose a face randomly
-    faces = np.random.randint(0, 6, size=n_pts)
-
+    #faces = np.random.randint(0, 6, size=n_pts)
+    faces = np.full(n_pts, 1) 
     # Generate two random numbers
     r_ = np.random.random((n_pts, 2))
 
@@ -69,6 +69,7 @@ def sample_on_aabb_surface(aabb_center, aabb_size, n_pts=1000, above_half=False)
     # 提取上半部分的点
     if above_half:
         points = points[points[:, -1] > aabb_center[-1]]
+
     return points
 def inverse_sigmoid(x):
     return torch.log(x/(1-x))

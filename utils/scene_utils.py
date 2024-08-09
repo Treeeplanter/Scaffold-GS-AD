@@ -6,6 +6,7 @@ from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont
 from matplotlib import pyplot as plt
 from utils.general_utils import PILtoTorch, DepthMaptoTorch, ObjectPILtoTorch
+from utils.nvs import random_change_view
 plt.rcParams['font.sans-serif'] = ['Times New Roman']
 
 import numpy as np
@@ -30,6 +31,7 @@ def save_log(image,gt_image,depth,gt_depth,iteration,model_path,time_now):
     gt_depth = gt_depth.permute(1,2,0).cpu().numpy()
     mask = gt_depth > 0
     mask = np.squeeze(mask)
+    depth_np[depth_np > 80] = 80
     depth_np = (depth_np - np.min(depth_np)) / (np.max(depth_np) - np.min(depth_np))*255
     gt_depth = (gt_depth - np.min(gt_depth)) / (np.max(gt_depth) - np.min(gt_depth))*255
 
@@ -73,7 +75,113 @@ def save_log(image,gt_image,depth,gt_depth,iteration,model_path,time_now):
     
 
 
-def render_nvs():
+def render_nvs(scene, gaussians, viewpoints, render_func, pipe, background,iteration, time_now):
+
+    path = os.path.join(scene.model_path, f"nvs")
+    if not os.path.exists(path):
+        os.makedirs(path)
+    nvs_view_points = random_change_view(viewpoints,0)
+
+    
+    for viewpoint in nvs_view_points:
+        #--------------------------
+        #gt rgb and lidar
+        #--------------------------
+        nvs_path = viewpoint.file_path #like /home/thousands/Baselines/S3Gaussian/data/waymo/processed/training/036/images/090_0.jpg
+        nvs_path = nvs_path.replace('_0.jpg', '_1.jpg')
+        cam_name = image_path = nvs_path
+        image_name = Path(cam_name).stem
+        image = Image.open(image_path)
+        im_data = np.array(image.convert("RGBA"))
+        bg = np.array([0, 0, 0]) # d-nerf 透明背景
+        norm_data = im_data / 255.0
+        arr = norm_data[:,:,:3] * norm_data[:, :, 3:4] + bg * (1 - norm_data[:, :, 3:4])
+        image = Image.fromarray(np.array(arr*255.0, dtype=np.byte), "RGB")
+        load_size = [640, 960]
+        gt_image =PILtoTorch(image, [load_size[1], load_size[0]])
+        gt_image = gt_image[:3, ...]
+        gt_image = gt_image.to("cuda")
+        
+        ##nvs_lidar
+        file_name = os.path.basename(nvs_path)
+        name_parts = file_name.split('_')
+        lidar_idx = name_parts[0]+".bin"
+        parent_dir = os.path.dirname(nvs_path)  # 获取父目录，结果为"/home/thousands/Baselines/S3Gaussian/data/waymo/processed/training/036/images"
+        parent_dir = os.path.dirname(parent_dir)
+        lidar_path = os.path.join(parent_dir, "lidar", lidar_idx)
+
+        lidar_info = np.memmap(#np.memmap是numpy库中的一个函数，它可以将大文件映射到内存中，而不是一次性加载到内存，这样可以节省内存资源。
+            lidar_path,
+            dtype=np.float32,
+            mode="r",
+        ).reshape(-1, 10) 
+        #).reshape(-1, 14)
+        lidar_points = lidar_info[:, 3:6]#3,4,5
+
+        # select lidar points based on a truncated ego-forward-directional range
+        # make sure most of lidar points are within the range of the camera
+        truncated_min_range, truncated_max_range = -2, 80
+        valid_mask = lidar_points[:, 0] < truncated_max_range#truncated_min_range, truncated_max_range = -2, 80，截断范围
+        valid_mask = valid_mask & (lidar_points[:, 0] > truncated_min_range)
+        lidar_points = lidar_points[valid_mask]
+
+        lidar_to_world = viewpoint.lidar_to_world.numpy()
+        
+        # transform lidar points to world coordinate system
+
+        lidar_points = (
+            lidar_to_world[:3, :3] @ lidar_points.T
+            + lidar_to_world[:3, 3:4]
+        ).T
+        
+        # world-lidar-pts --> camera-pts : w2c
+        #lidar_points = scene.points.points
+        c2w = viewpoint.c2w
+        w2c = np.linalg.inv(c2w)
+        cam_points = (
+            w2c[:3, :3] @ lidar_points.T
+            + w2c[:3, 3:4]
+        ).T
+        # camera-pts --> pixel-pts : intrinsic @ (x,y,z) = (u,v,1)*z
+        pixel_points = (
+            viewpoint.intrinsic @ cam_points.T
+        ).T
+        # select points in front of the camera
+        pixel_points = pixel_points[pixel_points[:, 2]>0]
+        #pixel_points = pixel_points[pixel_points[:, 2]<80]
+        # normalize pixel points : (u,v,1)
+        image_points = pixel_points[:, :2] / pixel_points[:, 2:]
+        # filter out points outside the image
+        valid_mask = (
+            (image_points[:, 0] >= 0)
+            & (image_points[:, 0] < load_size[1])
+            & (image_points[:, 1] >= 0)
+            & (image_points[:, 1] < load_size[0])
+        )
+        pixel_points = pixel_points[valid_mask]     # pts_cam : (x,y,z)
+        image_points = image_points[valid_mask]     # pts_img : (u,v)
+        # compute depth map
+        gt_depth_map = np.zeros(load_size)
+        image_points = image_points.numpy()
+        gt_depth_map[image_points[:, 1].astype(np.int32), image_points[:, 0].astype(np.int32)] = pixel_points[:, 2]#像素值是深度值
+        gt_depth_map = DepthMaptoTorch( gt_depth_map)
+        gt_depth_map = gt_depth_map.to("cuda")
+
+
+        #--------------------------
+        #render
+        #--------------------------
+        render_pkg = render_func(viewpoint, gaussians, pipe, background)
+        image = render_pkg["render"]
+        depth = render_pkg["depth"]
+        
+        save_log(image,gt_image,depth,gt_depth_map,iteration,path,time_now)
+
+
+
+
+
+    
     pass
 def render_training_image(scene, gaussians, viewpoints, render_func, pipe, background,iteration, time_now, nvs=False):
     def render(scene, gaussians, viewpoint, path, scaling):
