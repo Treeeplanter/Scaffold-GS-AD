@@ -48,9 +48,9 @@ class ModelParams(ParamGroup):
     def __init__(self, parser, sentinel=False):
         self.sh_degree = 3
         self.feat_dim = 32
-        self.n_offsets = 10
-        self.voxel_size =  0.05 # if voxel_size<=0, using 1nn dist
-        self.update_depth = 3
+        self.n_offsets = 5
+        self.voxel_size =  0.1 # if voxel_size<=0, using 1nn dist
+        self.update_depth = 1
         self.update_init_factor = 16
         self.update_hierachy_factor = 4
 
@@ -78,12 +78,13 @@ class ModelParams(ParamGroup):
 
 
         # waymo
-        self.start_time = 120 # now hard-coded 081:80-110, 036:45-90 019：0-30
-        self.end_time = 170
-        self.read_freq = 1
-        self.num_pts = 1500000 
+        self.start_time = 30 # now hard-coded 081:80-110, 036:45-90 019：0-30
+        self.end_time = 130
+        self.read_freq = 2
+        self.num_pts = 2000000 
         self.load_intrinsic = True
         self.load_c2w = True
+        self.render_nvs = False
         
         super().__init__(parser, "Loading Parameters", sentinel)
 
@@ -101,7 +102,7 @@ class PipelineParams(ParamGroup):
 
 class OptimizationParams(ParamGroup):
     def __init__(self, parser):
-        self.iterations = 30_000
+        self.iterations = 30000
         self.position_lr_init = 0.0
         self.position_lr_final = 0.0
         self.position_lr_delay_mult = 0.01
@@ -148,15 +149,16 @@ class OptimizationParams(ParamGroup):
         self.appearance_lr_delay_mult = 0.01
         self.appearance_lr_max_steps = 30_000
 
-        self.percent_dense = 0.01
+        self.percent_dense = 0.2
         self.lambda_dssim = 0.2
         self.lambda_depth = 0.5
+        self.lambda_offset = 0.6
         
         # for anchor densification
         self.start_stat = 500
-        self.update_from = 1500
+        self.update_from = 50000
         self.update_interval = 100
-        self.update_until = 15_000
+        self.update_until = 20000
         
         self.min_opacity = 0.005
         self.success_threshold = 0.8

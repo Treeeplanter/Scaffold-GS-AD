@@ -22,6 +22,7 @@ from simple_knn._C import distCUDA2
 from utils.graphics_utils import BasicPointCloud
 from utils.general_utils import strip_symmetric, build_scaling_rotation
 from scene.embedding import Embedding
+from einops import repeat
 
     
 class GaussianModel:
@@ -400,7 +401,7 @@ class GaussianModel:
             l.append('rot_{}'.format(i))
         return l
 
-    def save_ply(self, path):
+    def save_ply(self, path):#save anchors
         mkdir_p(os.path.dirname(path))
 
         anchor = self._anchor.detach().cpu().numpy()
@@ -418,6 +419,49 @@ class GaussianModel:
         elements[:] = list(map(tuple, attributes))
         el = PlyElement.describe(elements, 'vertex')
         PlyData([el]).write(path)
+    
+    def save_nerual_gaussian(self, path,mask):
+        mkdir_p(os.path.dirname(path))
+        # concatenated = torch.cat([self._scaling, self._anchor], dim=-1)
+        # concatenated_repeated = repeat(concatenated, 'n (c) -> (n k) (c)', k=self.n_offsets)
+        
+        # offset = self._offset.view([-1, 3]).detach()
+        # offset_mask = (self.offset_denom < 100*0.8*0.5).squeeze(dim=1)
+        # scaling,anchor = concatenated_repeated.split([6, 3], dim=-1)
+        #     # Ensure the directory exists
+        # print("anchor shape", anchor.shape)
+        # print("offset shape", offset.shape)
+        # xyz =  anchor+ offset#*scaling[:,:3]
+        # # print(xyz.shape)
+        # # xyz[offset_mask] = 0
+        # xyz = xyz.detach().cpu().numpy()
+        # dtype_full = [('x', 'f4'), ('y', 'f4'), ('z', 'f4')]
+        # elements = np.empty(xyz.shape[0], dtype=dtype_full)
+        # attributes = np.concatenate((xyz,), axis=1)
+        # elements[:] = list(map(tuple, attributes))
+        # el = PlyElement.describe(elements, 'vertex')
+        # PlyData([el]).write(path)    
+
+        anchor = self.get_anchor[mask]
+        grid_offsets = self._offset[mask]
+        grid_scaling = self.get_scaling[mask]
+        offsets = grid_offsets.view([-1, 3])
+        
+        concatenated = torch.cat([grid_scaling, anchor], dim=-1) # [N, 6+3]
+        concatenated_repeated = repeat(concatenated, 'n (c) -> (n k) (c)', k = self.n_offsets) # [N*k, 6+3]
+        scaling_repeat, repeat_anchor = concatenated_repeated.split([6, 3], dim=-1)
+        
+        offsets = offsets * scaling_repeat[:,:3]
+        xyz = repeat_anchor + offsets
+        xyz_np = xyz.cpu().numpy()
+
+        #将xyz点云保存为ply文件
+        dtype_full = [('x', 'f4'), ('y', 'f4'), ('z', 'f4')]
+        elements = np.empty(xyz_np.shape[0], dtype=dtype_full)
+        attributes = np.concatenate((xyz_np,), axis=1)
+        elements[:] = list(map(tuple, attributes))
+        el = PlyElement.describe(elements, 'vertex')
+        PlyData([el]).write(path)    
 
     def load_ply_sparse_gaussian(self, path):
         plydata = PlyData.read(path)
@@ -461,7 +505,6 @@ class GaussianModel:
         self._scaling = nn.Parameter(torch.tensor(scales, dtype=torch.float, device="cuda").requires_grad_(True))
         self._rotation = nn.Parameter(torch.tensor(rots, dtype=torch.float, device="cuda").requires_grad_(True))
 
-
     def replace_tensor_to_optimizer(self, tensor, name):
         optimizable_tensors = {}
         for group in self.optimizer.param_groups:
@@ -476,7 +519,6 @@ class GaussianModel:
 
                 optimizable_tensors[group["name"]] = group["params"][0]
         return optimizable_tensors
-
 
     def cat_tensors_to_optimizer(self, tensors_dict):
         optimizable_tensors = {}
@@ -504,8 +546,8 @@ class GaussianModel:
 
         return optimizable_tensors
 
-
     # statis grad information to guide liftting. 
+    #根据mask累计梯度，anchor_mask通过视锥范围选择，offset_mask通过不透明度选择
     def training_statis(self, viewspace_point_tensor, opacity, update_filter, offset_selection_mask, anchor_visible_mask):
         # update opacity stats
         temp_opacity = opacity.clone().view(-1).detach()
@@ -520,16 +562,57 @@ class GaussianModel:
         # update neural gaussian statis
         anchor_visible_mask = anchor_visible_mask.unsqueeze(dim=1).repeat([1, self.n_offsets]).view(-1)
         combined_mask = torch.zeros_like(self.offset_gradient_accum, dtype=torch.bool).squeeze(dim=1)
-        combined_mask[anchor_visible_mask] = offset_selection_mask
+        combined_mask[anchor_visible_mask] = offset_selection_mask #对于每个offset,其anchor有效时，还要看neural_opacity>0.0？
         temp_mask = combined_mask.clone()
-        combined_mask[temp_mask] = update_filter
+        combined_mask[temp_mask] = update_filter#还要看radii是否>0
         
-        grad_norm = torch.norm(viewspace_point_tensor.grad[update_filter,:2], dim=-1, keepdim=True)
-        self.offset_gradient_accum[combined_mask] += grad_norm
-        self.offset_denom[combined_mask] += 1
+        grad_norm = torch.norm(viewspace_point_tensor.grad[update_filter,:2], dim=-1, keepdim=True)#这是梯度的来源，这个梯度传回到viewspace_point_tensor后，应用于offset
+        #这是每个offset对应的viewspace_point_tensor的梯度
+        self.offset_gradient_accum[combined_mask] += grad_norm#满足所有条件的offset的梯度累加
+        self.offset_denom[combined_mask] += 1 #满足所有条件的offset的数量累加，作为累计梯度的分母
+     
+    def filter_grid_neighbor(self, selected_grid_coords_unique, grid_coords):
+        num_offsets = selected_grid_coords_unique.shape[0]
 
+        # 初始化张量来存储邻居信息
+        valid_neighbors = torch.zeros(num_offsets, dtype=torch.bool)
         
+        # 计算所有可能的邻居偏移量
+        neighbor_offsets = torch.tensor([[i, j, k] for i in [-1, 0, 1] 
+                                        for j in [-1, 0, 1] 
+                                        for k in [-1, 0, 1] 
+                                        if (i != 0 or j != 0 or k != 0)], dtype=torch.int,device=selected_grid_coords_unique.device)#形状为(26,3)
+        
+        # 计算所有偏移量的邻居位置
+        selected_grid = selected_grid_coords_unique.unsqueeze(1)  # [num_offsets, 1, 3]
+        neighbors = selected_grid + neighbor_offsets  # [num_offsets, num_neighbors, 3]
 
+        # 计算 grid_coords 的所有偏移量是否在 neighbors 中
+        grid_coords_expanded = grid_coords.unsqueeze(0).unsqueeze(0)  # [1, 1, num_coords, 3]
+        neighbors_expanded = neighbors.unsqueeze(2)  # [num_offsets, num_neighbors, 1, 3]
+
+        # 检查邻居是否在 grid_coords 中
+        # matches = (neighbors_expanded == grid_coords_expanded).all(dim=3)  # [num_offsets, num_neighbors, num_coords]
+        # matches = matches.any(dim=2)  # [num_offsets, num_neighbors]
+
+        ## split data for reducing peak memory calling
+
+        chunk_size = 4096
+        max_iters = grid_coords.shape[0] // chunk_size + (1 if grid_coords.shape[0] % chunk_size != 0 else 0)
+        mask_list = []
+        for i in range(max_iters):
+            cur_mask = (neighbors_expanded == grid_coords[i*chunk_size:(i+1)*chunk_size, :]).all(dim=3).any(dim=2)
+            mask_list.append(cur_mask)
+        
+        matches = reduce(torch.logical_or, mask_list)
+
+        # 计算每个偏移量的有效邻居数量
+        neighbor_counts = matches.sum(dim=1)  # [num_offsets]
+
+        # 检查邻居中是否有至少三个在 grid_coords 中
+        valid_neighbors = neighbor_counts >= 3  # [num_offsets]
+    
+        return valid_neighbors
         
     def _prune_anchor_optimizer(self, mask):
         optimizable_tensors = {}
@@ -578,112 +661,103 @@ class GaussianModel:
         self._scaling = optimizable_tensors["scaling"]
         self._rotation = optimizable_tensors["rotation"]
 
-    
     def anchor_growing(self, grads, threshold, offset_mask):
         ## 
         init_length = self.get_anchor.shape[0]*self.n_offsets
-        for i in range(self.update_depth):
-            # update threshold
-            cur_threshold = threshold*((self.update_hierachy_factor//2)**i)
-            # mask from grad threshold
-            candidate_mask = (grads >= cur_threshold)
-            candidate_mask = torch.logical_and(candidate_mask, offset_mask)
+
+       
+        # update threshold
+        cur_threshold = threshold #*((self.update_hierachy_factor//2)**i)#4
+        # mask from grad threshold
+        candidate_mask = (grads >= cur_threshold)#[N*k, 1]
+        candidate_mask = torch.logical_and(candidate_mask, offset_mask)#[N*k,1], offset_mask是看offset的denom>40?
+        
+        all_xyz = self.get_anchor.unsqueeze(dim=1) + self._offset * self.get_scaling[:,:3].unsqueeze(dim=1)
+        
+        # assert self.update_init_factor // (self.update_hierachy_factor**i) > 0
+        # size_factor = min(self.update_init_factor // (self.update_hierachy_factor**i), 1)
+        #size_factor = self.update_init_factor // (self.update_hierachy_factor**i)#16 // 4^i， 16，4，1 对应 i=0,1,2
+        cur_size = self.voxel_size#*size_factor
+        
+        grid_coords = torch.round(self.get_anchor / cur_size).int()#获取anchor的grid坐标,[N,3]
+
+        selected_xyz = all_xyz.view([-1, 3])[candidate_mask]#满足梯度等条件的offsets
+        selected_grid_coords = torch.round(selected_xyz / cur_size).int()#获取要优化的offset的grid坐标,[N*k,3]
+
+        selected_grid_coords_unique, inverse_indices = torch.unique(selected_grid_coords, return_inverse=True, dim=0)#获取当前分辨率网格的唯一坐标和inverse,[N*k,3],[N*k]
+
+
+        ## split data for reducing peak memory calling
+        use_chunk = True
+        if use_chunk:
+            chunk_size = 4096
+            max_iters = grid_coords.shape[0] // chunk_size + (1 if grid_coords.shape[0] % chunk_size != 0 else 0)
+            remove_duplicates_list = []
+            for i in range(max_iters):
+                cur_remove_duplicates = (selected_grid_coords_unique.unsqueeze(1) == grid_coords[i*chunk_size:(i+1)*chunk_size, :]).all(-1).any(-1).view(-1)
+                remove_duplicates_list.append(cur_remove_duplicates)
             
-            # random pick
-            rand_mask = torch.rand_like(candidate_mask.float())>(0.5**(i+1))
-            rand_mask = rand_mask.cuda()
-            candidate_mask = torch.logical_and(candidate_mask, rand_mask)
+            remove_duplicates = reduce(torch.logical_or, remove_duplicates_list)
+        else:
+            remove_duplicates = (selected_grid_coords_unique.unsqueeze(1) == grid_coords).all(-1).any(-1).view(-1)#当前分辨率下，筛选出要优化的offset和anchor在同一个网格中的索引
+        
+        remove_duplicates = ~remove_duplicates#当前分辨率下，筛选出要优化的offset和anchor不在同一个网格中的索引,相当于是此时，anchor已经不能满足offset的生长？
+        #TODO:为了避免乱生长的offsets导致在空间区域生成，这里应该设置一个筛选，就是要新生成anchor的grid,其领域必须存在3个以上的anchor,以及还要在purne中检查是否存在孤立的anchor
+        #对于offsets太远的anchor也要删除
+        selected_grid_coords_unique=selected_grid_coords_unique[remove_duplicates]
+        neighbor_mask = self.filter_grid_neighbor(selected_grid_coords_unique,grid_coords)
+        candidate_anchor = selected_grid_coords_unique[neighbor_mask]*cur_size#当前分辨率下，要有新anchor的grid索引
+
+        
+        if candidate_anchor.shape[0] > 0:
+            new_scaling = torch.ones_like(candidate_anchor).repeat([1,2]).float().cuda()*cur_size # *0.05
+            new_scaling = torch.log(new_scaling)
+            new_rotation = torch.zeros([candidate_anchor.shape[0], 4], device=candidate_anchor.device).float()
+            new_rotation[:,0] = 1.0
+
+            new_opacities = inverse_sigmoid(0.1 * torch.ones((candidate_anchor.shape[0], 1), dtype=torch.float, device="cuda"))
+
+            new_feat = self._anchor_feat.unsqueeze(dim=1).repeat([1, self.n_offsets, 1]).view([-1, self.feat_dim])[candidate_mask]
+
+            new_feat = scatter_max(new_feat, inverse_indices.unsqueeze(1).expand(-1, new_feat.size(1)), dim=0)[0][remove_duplicates]
+            new_feat = new_feat[neighbor_mask]
+
+            new_offsets = torch.zeros_like(candidate_anchor).unsqueeze(dim=1).repeat([1,self.n_offsets,1]).float().cuda()
+
+            d = {
+                "anchor": candidate_anchor,
+                "scaling": new_scaling,
+                "rotation": new_rotation,
+                "anchor_feat": new_feat,
+                "offset": new_offsets,
+                "opacity": new_opacities,
+            }
             
-            length_inc = self.get_anchor.shape[0]*self.n_offsets - init_length
-            if length_inc == 0:
-                if i > 0:
-                    continue
-            else:
-                candidate_mask = torch.cat([candidate_mask, torch.zeros(length_inc, dtype=torch.bool, device='cuda')], dim=0)
 
-            all_xyz = self.get_anchor.unsqueeze(dim=1) + self._offset * self.get_scaling[:,:3].unsqueeze(dim=1)
+            temp_anchor_demon = torch.cat([self.anchor_demon, torch.zeros([new_opacities.shape[0], 1], device='cuda').float()], dim=0)
+            del self.anchor_demon
+            self.anchor_demon = temp_anchor_demon
+
+            temp_opacity_accum = torch.cat([self.opacity_accum, torch.zeros([new_opacities.shape[0], 1], device='cuda').float()], dim=0)
+            del self.opacity_accum
+            self.opacity_accum = temp_opacity_accum
+
+            torch.cuda.empty_cache()
             
-            # assert self.update_init_factor // (self.update_hierachy_factor**i) > 0
-            # size_factor = min(self.update_init_factor // (self.update_hierachy_factor**i), 1)
-            size_factor = self.update_init_factor // (self.update_hierachy_factor**i)
-            cur_size = self.voxel_size*size_factor
-            
-            grid_coords = torch.round(self.get_anchor / cur_size).int()
-
-            selected_xyz = all_xyz.view([-1, 3])[candidate_mask]
-            selected_grid_coords = torch.round(selected_xyz / cur_size).int()
-
-            selected_grid_coords_unique, inverse_indices = torch.unique(selected_grid_coords, return_inverse=True, dim=0)
-
-
-            ## split data for reducing peak memory calling
-            use_chunk = True
-            if use_chunk:
-                chunk_size = 4096
-                max_iters = grid_coords.shape[0] // chunk_size + (1 if grid_coords.shape[0] % chunk_size != 0 else 0)
-                remove_duplicates_list = []
-                for i in range(max_iters):
-                    cur_remove_duplicates = (selected_grid_coords_unique.unsqueeze(1) == grid_coords[i*chunk_size:(i+1)*chunk_size, :]).all(-1).any(-1).view(-1)
-                    remove_duplicates_list.append(cur_remove_duplicates)
+            optimizable_tensors = self.cat_tensors_to_optimizer(d)
+            self._anchor = optimizable_tensors["anchor"]
+            self._scaling = optimizable_tensors["scaling"]
+            self._rotation = optimizable_tensors["rotation"]
+            self._anchor_feat = optimizable_tensors["anchor_feat"]
+            self._offset = optimizable_tensors["offset"]
+            self._opacity = optimizable_tensors["opacity"]
                 
-                remove_duplicates = reduce(torch.logical_or, remove_duplicates_list)
-            else:
-                remove_duplicates = (selected_grid_coords_unique.unsqueeze(1) == grid_coords).all(-1).any(-1).view(-1)
-
-            remove_duplicates = ~remove_duplicates
-            candidate_anchor = selected_grid_coords_unique[remove_duplicates]*cur_size
-
-            
-            if candidate_anchor.shape[0] > 0:
-                new_scaling = torch.ones_like(candidate_anchor).repeat([1,2]).float().cuda()*cur_size # *0.05
-                new_scaling = torch.log(new_scaling)
-                new_rotation = torch.zeros([candidate_anchor.shape[0], 4], device=candidate_anchor.device).float()
-                new_rotation[:,0] = 1.0
-
-                new_opacities = inverse_sigmoid(0.1 * torch.ones((candidate_anchor.shape[0], 1), dtype=torch.float, device="cuda"))
-
-                new_feat = self._anchor_feat.unsqueeze(dim=1).repeat([1, self.n_offsets, 1]).view([-1, self.feat_dim])[candidate_mask]
-
-                new_feat = scatter_max(new_feat, inverse_indices.unsqueeze(1).expand(-1, new_feat.size(1)), dim=0)[0][remove_duplicates]
-
-                new_offsets = torch.zeros_like(candidate_anchor).unsqueeze(dim=1).repeat([1,self.n_offsets,1]).float().cuda()
-
-                d = {
-                    "anchor": candidate_anchor,
-                    "scaling": new_scaling,
-                    "rotation": new_rotation,
-                    "anchor_feat": new_feat,
-                    "offset": new_offsets,
-                    "opacity": new_opacities,
-                }
-                
-
-                temp_anchor_demon = torch.cat([self.anchor_demon, torch.zeros([new_opacities.shape[0], 1], device='cuda').float()], dim=0)
-                del self.anchor_demon
-                self.anchor_demon = temp_anchor_demon
-
-                temp_opacity_accum = torch.cat([self.opacity_accum, torch.zeros([new_opacities.shape[0], 1], device='cuda').float()], dim=0)
-                del self.opacity_accum
-                self.opacity_accum = temp_opacity_accum
-
-                torch.cuda.empty_cache()
-                
-                optimizable_tensors = self.cat_tensors_to_optimizer(d)
-                self._anchor = optimizable_tensors["anchor"]
-                self._scaling = optimizable_tensors["scaling"]
-                self._rotation = optimizable_tensors["rotation"]
-                self._anchor_feat = optimizable_tensors["anchor_feat"]
-                self._offset = optimizable_tensors["offset"]
-                self._opacity = optimizable_tensors["opacity"]
-                
-
-
     def adjust_anchor(self, check_interval=100, success_threshold=0.8, grad_threshold=0.0002, min_opacity=0.005):
         # # adding anchors
-        grads = self.offset_gradient_accum / self.offset_denom # [N*k, 1]
+        grads = self.offset_gradient_accum / self.offset_denom # [N*k, 1], 累计梯度/累计数量 = 平均梯度
         grads[grads.isnan()] = 0.0
-        grads_norm = torch.norm(grads, dim=-1)
-        offset_mask = (self.offset_denom > check_interval*success_threshold*0.5).squeeze(dim=1)
+        grads_norm = torch.norm(grads, dim=-1)# [N*k]
+        offset_mask = (self.offset_denom > check_interval*success_threshold*0.5).squeeze(dim=1)#
         
         self.anchor_growing(grads_norm, grad_threshold, offset_mask)
         
@@ -706,8 +780,8 @@ class GaussianModel:
         prune_mask = torch.logical_and(prune_mask, anchors_mask) # [N] 
         
         # update offset_denom
-        offset_denom = self.offset_denom.view([-1, self.n_offsets])[~prune_mask]
-        offset_denom = offset_denom.view([-1, 1])
+        offset_denom = self.offset_denom.view([-1, self.n_offsets])[~prune_mask]#[N,k]
+        offset_denom = offset_denom.view([-1, 1])#[N*k,1]
         del self.offset_denom
         self.offset_denom = offset_denom
 
@@ -788,7 +862,6 @@ class GaussianModel:
                     }, os.path.join(path, 'checkpoints.pth'))
         else:
             raise NotImplementedError
-
 
     def load_mlp_checkpoints(self, path, mode = 'split'):#split or unite
         if mode == 'split':
