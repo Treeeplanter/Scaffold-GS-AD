@@ -8,7 +8,7 @@ from matplotlib import pyplot as plt
 from utils.general_utils import PILtoTorch, DepthMaptoTorch, ObjectPILtoTorch
 from utils.nvs import random_change_view
 plt.rcParams['font.sans-serif'] = ['Times New Roman']
-
+from gaussian_renderer import prefilter_voxel
 import numpy as np
 from utils.image_utils import psnr
 import copy
@@ -171,18 +171,13 @@ def render_nvs(scene, gaussians, viewpoints, render_func, pipe, background,itera
         #--------------------------
         #render
         #--------------------------
-        render_pkg = render_func(viewpoint, gaussians, pipe, background)
+        voxel_visible_mask = prefilter_voxel(viewpoint, gaussians, pipe,background)
+        render_pkg = render_func(viewpoint, gaussians, pipe, background,visible_mask=voxel_visible_mask)
         image = render_pkg["render"]
         depth = render_pkg["depth"]
         
         save_log(image,gt_image,depth,gt_depth_map,iteration,path,time_now)
 
-
-
-
-
-    
-    pass
 def render_training_image(scene, gaussians, viewpoints, render_func, pipe, background,iteration, time_now, nvs=False):
     def render(scene, gaussians, viewpoint, path, scaling):
         # scaling_copy = gaussians._scaling

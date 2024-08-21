@@ -12,6 +12,8 @@
 import os
 import random
 import json
+import torch
+import numpy as np
 from utils.system_utils import searchForMaxIteration
 from scene.dataset_readers import sceneLoadTypeCallbacks
 from scene.gaussian_model import GaussianModel
@@ -107,14 +109,16 @@ class Scene:
         else:
             self.gaussians.create_from_pcd(scene_info.point_cloud, self.cameras_extent)
 
-    def save(self, iteration):
+    def save(self, iteration,mask):
         point_cloud_path = os.path.join(self.model_path, "point_cloud/iteration_{}".format(iteration))
         self.gaussians.save_ply(os.path.join(point_cloud_path, "point_cloud.ply"))
         self.gaussians.save_mlp_checkpoints(point_cloud_path)
-        self.gaussians.save_nerual_gaussian(os.path.join(point_cloud_path, "neural_gaussian.ply"))
+        self.gaussians.save_nerual_gaussian(os.path.join(point_cloud_path, "neural_gaussian.ply"),mask)
 
     def getTrainCameras(self, scale=1.0):
         return self.train_cameras[scale]
 
     def getTestCameras(self, scale=1.0):
         return self.test_cameras[scale]
+    
+

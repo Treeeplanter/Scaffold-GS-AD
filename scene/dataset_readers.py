@@ -816,7 +816,7 @@ def readWaymoInfo(path, model_path, white_background, eval, extension=".png", us
     depth_maps = None
     # bg-gs settings
     #use_bg_gs = False
-    bg_scale = 2.0 # used to scale fg-aabb
+    bg_scale = 1 # used to scale fg-aabb
     if not os.path.exists(pts_path) or not load_lidar:
         # random sample
         # Since this data set has no colmap data, we start with random points
@@ -868,38 +868,38 @@ def readWaymoInfo(path, model_path, white_background, eval, extension=".png", us
                 lidar_to_worlds[t][:3, :3] @ lidar_points.T
                 + lidar_to_worlds[t][:3, 3:4]
             ).T
-            if load_depthmap:
-                # transform world-lidar to pixel-depth-map
-                for cam_idx in range(len(camera_list)):
-                    # world-lidar-pts --> camera-pts : w2c
-                    c2w = cam_to_worlds[int(len(camera_list))*t + cam_idx]
-                    w2c = np.linalg.inv(c2w)
-                    cam_points = (
-                        w2c[:3, :3] @ lidar_points.T
-                        + w2c[:3, 3:4]
-                    ).T
-                    # camera-pts --> pixel-pts : intrinsic @ (x,y,z) = (u,v,1)*z
-                    pixel_points = (
-                        intrinsics[int(len(camera_list))*t + cam_idx] @ cam_points.T
-                    ).T
-                    # select points in front of the camera
-                    pixel_points = pixel_points[pixel_points[:, 2]>0]
-                    #pixel_points = pixel_points[pixel_points[:, 2]<80]
-                    # normalize pixel points : (u,v,1)
-                    image_points = pixel_points[:, :2] / pixel_points[:, 2:]
-                    # filter out points outside the image
-                    valid_mask = (
-                        (image_points[:, 0] >= 0)
-                        & (image_points[:, 0] < load_size[1])
-                        & (image_points[:, 1] >= 0)
-                        & (image_points[:, 1] < load_size[0])
-                    )
-                    pixel_points = pixel_points[valid_mask]     # pts_cam : (x,y,z)
-                    image_points = image_points[valid_mask]     # pts_img : (u,v)
-                    # compute depth map
-                    depth_map = np.zeros(load_size)
-                    depth_map[image_points[:, 1].astype(np.int32), image_points[:, 0].astype(np.int32)] = pixel_points[:, 2]
-                    depth_maps.append(depth_map)
+            # if load_depthmap:
+            #     # transform world-lidar to pixel-depth-map
+            #     for cam_idx in range(len(camera_list)):
+            #         # world-lidar-pts --> camera-pts : w2c
+            #         c2w = cam_to_worlds[int(len(camera_list))*t + cam_idx]
+            #         w2c = np.linalg.inv(c2w)
+            #         cam_points = (
+            #             w2c[:3, :3] @ lidar_points.T
+            #             + w2c[:3, 3:4]
+            #         ).T
+            #         # camera-pts --> pixel-pts : intrinsic @ (x,y,z) = (u,v,1)*z
+            #         pixel_points = (
+            #             intrinsics[int(len(camera_list))*t + cam_idx] @ cam_points.T
+            #         ).T
+            #         # select points in front of the camera
+            #         pixel_points = pixel_points[pixel_points[:, 2]>0]
+            #         #pixel_points = pixel_points[pixel_points[:, 2]<80]
+            #         # normalize pixel points : (u,v,1)
+            #         image_points = pixel_points[:, :2] / pixel_points[:, 2:]
+            #         # filter out points outside the image
+            #         valid_mask = (
+            #             (image_points[:, 0] >= 0)
+            #             & (image_points[:, 0] < load_size[1])
+            #             & (image_points[:, 1] >= 0)
+            #             & (image_points[:, 1] < load_size[0])
+            #         )
+            #         pixel_points = pixel_points[valid_mask]     # pts_cam : (x,y,z)
+            #         image_points = image_points[valid_mask]     # pts_img : (u,v)
+            #         # compute depth map
+            #         depth_map = np.zeros(load_size)
+            #         depth_map[image_points[:, 1].astype(np.int32), image_points[:, 0].astype(np.int32)] = pixel_points[:, 2]
+            #         depth_maps.append(depth_map)
             # compute lidar directions
             lidar_directions = lidar_points - lidar_origins
             lidar_ranges = np.linalg.norm(lidar_directions, axis=-1, keepdims=True)#长度
@@ -917,19 +917,30 @@ def readWaymoInfo(path, model_path, white_background, eval, extension=".png", us
         #------------------------------
         # generate full points
         #------------------------------
-        
-        # if load_depthmap:
-        #     from utils.full_depth import img2fulldepth
-        #     image_paths = []
-        #     cam_intrinsics = []
-        #     pred_depth_maps = []
-        #     pred_points = []
-        #     cam2worlds = []
-        #     for t in range(len(img_filepaths)):
-        #         image_paths.append(img_filepaths[t])
-        #         cam_intrinsics.append(intrinsics[0])
-        #         cam2worlds.append(cam_to_worlds[t])
-        #     depth_maps = img2fulldepth(image_paths, cam_intrinsics, load_size)
+        from utils.colmappcd import extractCOLMAP_waymo
+        colmap_points = extractCOLMAP_waymo(data_root, ego_to_world_start, start_time,end_time, read_freq)
+        points.append(colmap_points)
+
+
+        from submodules.Depth_Anything_V2.metric_depth.run import DepthEstimate
+        depth_path = os.path.join(data_root, "depth_maps")  
+        if load_depthmap:
+            if not os.path.exists(depth_path):
+                os.makedirs(depth_path)
+                image_paths = []
+                for t in range(len(img_filepaths)):
+                    image_paths.append(img_filepaths[t])
+
+                depth_maps = DepthEstimate (image_paths, depth_path, input_size = 518, encoder = 'vitl', max_depth=80)
+            else:
+                depth_maps = []
+                for t in range(len(img_filepaths)):
+                    depth_map = np.load(os.path.join(depth_path, f"{t:03d}.npy"))
+                    depth_maps.append(depth_map)
+
+
+            
+                
 
         #origins = np.concatenate(origins, axis=0)
         #directions = np.concatenate(directions, axis=0)
@@ -986,8 +997,9 @@ def readWaymoInfo(path, model_path, white_background, eval, extension=".png", us
             bg_gs_aabb = np.stack([fg_aabb_center - fg_aabb_size * bg_scale / 2, 
                         fg_aabb_center + fg_aabb_size * bg_scale / 2], axis=0)
             bg_aabb_center, bg_aabb_size = (bg_gs_aabb[0] + bg_gs_aabb[1]) / 2, bg_gs_aabb[1] - bg_gs_aabb[0]
+           
             # add bg_gs_aabb SURFACE points
-            bg_points = sample_on_aabb_surface(bg_aabb_center, bg_aabb_size, n_pts = 1000)
+            bg_points = sample_on_aabb_surface(bg_aabb_center, bg_aabb_size, n_pts = 2000, sample = 'sphere')
             print("bg_gs_points min:",np.min(bg_points,axis=0))
             print("bg_gs_points max:",np.max(bg_points,axis=0))
             # DO NOT add bg_gs_points to points

@@ -14,63 +14,84 @@ import sys
 from datetime import datetime
 import numpy as np
 import random
-def sample_on_aabb_surface(aabb_center, aabb_size, n_pts=1000, above_half=True):
-    """
-    0:立方体的左面(x轴负方向)
-    1:立方体的右面(x轴正方向)
-    2:立方体的下面(y轴负方向)
-    3:立方体的上面(y轴正方向)
-    4:立方体的后面(z轴负方向)
-    5:立方体的前面(z轴正方向)
-    """
-    # Choose a face randomly
-    #faces = np.random.randint(0, 6, size=n_pts)
-    faces = np.full(n_pts, 1) 
-    # Generate two random numbers
-    r_ = np.random.random((n_pts, 2))
+def sample_on_aabb_surface(aabb_center, aabb_size, n_pts=1000, sample = 'sphere', above_half=True):
+    if sample == 'sphere':
+        #在球面上均匀采样点
+        # 生成均匀的球面点
+        all_sphere_points =[]
+        for i in range(2):
+            radius = aabb_size[0]*(1.2**i)
+            phi = np.random.uniform(-np.pi/2, np.pi/2, n_pts)#uniform(-np.pi/4, np.pi/4, n_pts)
+            theta = np.random.uniform(np.pi/4, np.pi/2, n_pts)
+            x = radius * np.sin(theta) * np.cos(phi)
+            y = radius * np.sin(theta) * np.sin(phi)
+            z = radius * np.cos(theta)
+            
+            # 生成球面点的坐标
+            sphere_points = np.vstack((x, y, z)).T
+            sphere_points += aabb_center  # 移动到中心位置
+            all_sphere_points.append(sphere_points)
+        all_sphere_points = np.concatenate(all_sphere_points, axis=0)
 
-    # Create an array to store the points
-    points = np.zeros((n_pts, 3))
+        return all_sphere_points
 
-    # Define the offsets for each face
-    offsets = np.array([
-        [-aabb_size[0]/2, 0, 0],
-        [aabb_size[0]/2, 0, 0],
-        [0, -aabb_size[1]/2, 0],
-        [0, aabb_size[1]/2, 0],
-        [0, 0, -aabb_size[2]/2],
-        [0, 0, aabb_size[2]/2]
-    ])
+    else:
+        """
+        0:立方体的左面(x轴负方向)
+        1:立方体的右面(x轴正方向)
+        2:立方体的下面(y轴负方向)
+        3:立方体的上面(y轴正方向)
+        4:立方体的后面(z轴负方向)
+        5:立方体的前面(z轴正方向)
+        """
+        # Choose a face randomly
+        #faces = np.random.randint(0, 6, size=n_pts)
+        faces = np.full(n_pts, 1) 
+        # Generate two random numbers
+        r_ = np.random.random((n_pts, 2))
 
-    # Define the scales for each face
-    scales = np.array([
-        [aabb_size[1], aabb_size[2]],
-        [aabb_size[1], aabb_size[2]],
-        [aabb_size[0], aabb_size[2]],
-        [aabb_size[0], aabb_size[2]],
-        [aabb_size[0], aabb_size[1]],
-        [aabb_size[0], aabb_size[1]]
-    ])
+        # Create an array to store the points
+        points = np.zeros((n_pts, 3))
 
-    # Define the positions of the zero column for each face
-    zero_column_positions = [0, 0, 1, 1, 2, 2]
-    # Define the indices of the aabb_size components for each face
-    aabb_size_indices = [[1, 2], [1, 2], [0, 2], [0, 2], [0, 1], [0, 1]]
-    # Calculate the coordinates of the points for each face
-    for i in range(6):
-        mask = faces == i
-        r_scaled = r_[mask] * scales[i]
-        r_scaled = np.insert(r_scaled, zero_column_positions[i], 0, axis=1)
-        aabb_size_adjusted = np.insert(aabb_size[aabb_size_indices[i]] / 2, zero_column_positions[i], 0)
-        points[mask] = aabb_center + offsets[i] + r_scaled - aabb_size_adjusted
-        #visualize_points(points[mask], aabb_center, aabb_size)
-    #visualize_points(points, aabb_center, aabb_size)
-        
-    # 提取上半部分的点
-    if above_half:
-        points = points[points[:, -1] > aabb_center[-1]]
+        # Define the offsets for each face
+        offsets = np.array([
+            [-aabb_size[0]/2, 0, 0],
+            [aabb_size[0]/2, 0, 0],
+            [0, -aabb_size[1]/2, 0],
+            [0, aabb_size[1]/2, 0],
+            [0, 0, -aabb_size[2]/2],
+            [0, 0, aabb_size[2]/2]
+        ])
 
-    return points
+        # Define the scales for each face
+        scales = np.array([
+            [aabb_size[1], aabb_size[2]],
+            [aabb_size[1], aabb_size[2]],
+            [aabb_size[0], aabb_size[2]],
+            [aabb_size[0], aabb_size[2]],
+            [aabb_size[0], aabb_size[1]],
+            [aabb_size[0], aabb_size[1]]
+        ])
+
+        # Define the positions of the zero column for each face
+        zero_column_positions = [0, 0, 1, 1, 2, 2]
+        # Define the indices of the aabb_size components for each face
+        aabb_size_indices = [[1, 2], [1, 2], [0, 2], [0, 2], [0, 1], [0, 1]]
+        # Calculate the coordinates of the points for each face
+        for i in range(6):
+            mask = faces == i
+            r_scaled = r_[mask] * scales[i]
+            r_scaled = np.insert(r_scaled, zero_column_positions[i], 0, axis=1)
+            aabb_size_adjusted = np.insert(aabb_size[aabb_size_indices[i]] / 2, zero_column_positions[i], 0)
+            points[mask] = aabb_center + offsets[i] + r_scaled - aabb_size_adjusted
+            #visualize_points(points[mask], aabb_center, aabb_size)
+        #visualize_points(points, aabb_center, aabb_size)
+            
+        # 提取上半部分的点
+        if above_half:
+            points = points[points[:, -1] > aabb_center[-1]]
+
+        return points
 def inverse_sigmoid(x):
     return torch.log(x/(1-x))
 

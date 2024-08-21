@@ -188,7 +188,10 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
             # training_report(tb_writer, iteration, Ll1, loss, l1_loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, [pipe, background], stage)
             if (iteration == opt.iterations):
                 print("\n[ITER {}] Saving Gaussians".format(iteration))
-                scene.save(iteration)
+
+            
+                voxel_visible_mask = torch.stack([prefilter_voxel(viewpoint_cam, gaussians, pipe,background) for viewpoint_cam in train_cams], dim=0).sum(dim=0) > 0
+                scene.save(iteration, voxel_visible_mask)
                 import matplotlib.pyplot as plt
                 plt.figure()
                 plt.plot(loss_history,label='total_loss')
@@ -210,7 +213,7 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
                     or (iteration < 60000 and iteration %  3000 == 2999) \
                         or iteration == 1:
                     save_log(image,gt_image,depth_pred, gt_depth, iteration,scene.model_path,timer.get_elapsed_time())
-                    render_nvs(scene, gaussians, [train_cams[round(len(train_cams)/2)]], render, pipe, background, iteration, timer.get_elapsed_time())
+                    render_nvs(scene, gaussians, [train_cams[round(len(train_cams)-1)]], render, pipe, background, iteration, timer.get_elapsed_time())
                     # render_training_image(scene, gaussians, [train_cams[round(len(train_cams)/2)]], render, pipe, background, iteration,timer.get_elapsed_time())
                     # if dataset.render_nvs:
                     #     phase=dataset.nvs_phase

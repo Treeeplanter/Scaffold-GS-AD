@@ -420,22 +420,45 @@ class GaussianModel:
         el = PlyElement.describe(elements, 'vertex')
         PlyData([el]).write(path)
     
-    def save_nerual_gaussian(self, path):
+    def save_nerual_gaussian(self, path,mask):
         mkdir_p(os.path.dirname(path))
-        concatenated = torch.cat([self._scaling, self._anchor], dim=-1)
-        concatenated_repeated = repeat(concatenated, 'n (c) -> (n k) (c)', k=self.n_offsets)
+        # concatenated = torch.cat([self._scaling, self._anchor], dim=-1)
+        # concatenated_repeated = repeat(concatenated, 'n (c) -> (n k) (c)', k=self.n_offsets)
         
-        offset = self._offset.view([-1, 3]).detach()
-        offset_mask = (self.offset_denom < 100*0.8*0.5).squeeze(dim=1)
-        scaling,anchor = concatenated_repeated.split([6, 3], dim=-1)
-            # Ensure the directory exists
-        xyz =  anchor+ offset*scaling[:,:3]
-        # print(xyz.shape)
-        # xyz[offset_mask] = 0
-        xyz = xyz.detach().cpu().numpy()
+        # offset = self._offset.view([-1, 3]).detach()
+        # offset_mask = (self.offset_denom < 100*0.8*0.5).squeeze(dim=1)
+        # scaling,anchor = concatenated_repeated.split([6, 3], dim=-1)
+        #     # Ensure the directory exists
+        # print("anchor shape", anchor.shape)
+        # print("offset shape", offset.shape)
+        # xyz =  anchor+ offset#*scaling[:,:3]
+        # # print(xyz.shape)
+        # # xyz[offset_mask] = 0
+        # xyz = xyz.detach().cpu().numpy()
+        # dtype_full = [('x', 'f4'), ('y', 'f4'), ('z', 'f4')]
+        # elements = np.empty(xyz.shape[0], dtype=dtype_full)
+        # attributes = np.concatenate((xyz,), axis=1)
+        # elements[:] = list(map(tuple, attributes))
+        # el = PlyElement.describe(elements, 'vertex')
+        # PlyData([el]).write(path)    
+
+        anchor = self.get_anchor[mask]
+        grid_offsets = self._offset[mask]
+        grid_scaling = self.get_scaling[mask]
+        offsets = grid_offsets.view([-1, 3])
+        
+        concatenated = torch.cat([grid_scaling, anchor], dim=-1) # [N, 6+3]
+        concatenated_repeated = repeat(concatenated, 'n (c) -> (n k) (c)', k = self.n_offsets) # [N*k, 6+3]
+        scaling_repeat, repeat_anchor = concatenated_repeated.split([6, 3], dim=-1)
+        
+        offsets = offsets * scaling_repeat[:,:3]
+        xyz = repeat_anchor + offsets
+        xyz_np = xyz.cpu().numpy()
+
+        #将xyz点云保存为ply文件
         dtype_full = [('x', 'f4'), ('y', 'f4'), ('z', 'f4')]
-        elements = np.empty(xyz.shape[0], dtype=dtype_full)
-        attributes = np.concatenate((xyz,), axis=1)
+        elements = np.empty(xyz_np.shape[0], dtype=dtype_full)
+        attributes = np.concatenate((xyz_np,), axis=1)
         elements[:] = list(map(tuple, attributes))
         el = PlyElement.describe(elements, 'vertex')
         PlyData([el]).write(path)    
@@ -482,7 +505,6 @@ class GaussianModel:
         self._scaling = nn.Parameter(torch.tensor(scales, dtype=torch.float, device="cuda").requires_grad_(True))
         self._rotation = nn.Parameter(torch.tensor(rots, dtype=torch.float, device="cuda").requires_grad_(True))
 
-
     def replace_tensor_to_optimizer(self, tensor, name):
         optimizable_tensors = {}
         for group in self.optimizer.param_groups:
@@ -497,7 +519,6 @@ class GaussianModel:
 
                 optimizable_tensors[group["name"]] = group["params"][0]
         return optimizable_tensors
-
 
     def cat_tensors_to_optimizer(self, tensors_dict):
         optimizable_tensors = {}
@@ -525,7 +546,6 @@ class GaussianModel:
 
         return optimizable_tensors
 
-
     # statis grad information to guide liftting. 
     #根据mask累计梯度，anchor_mask通过视锥范围选择，offset_mask通过不透明度选择
     def training_statis(self, viewspace_point_tensor, opacity, update_filter, offset_selection_mask, anchor_visible_mask):
@@ -547,6 +567,7 @@ class GaussianModel:
         combined_mask[temp_mask] = update_filter#还要看radii是否>0
         
         grad_norm = torch.norm(viewspace_point_tensor.grad[update_filter,:2], dim=-1, keepdim=True)#这是梯度的来源，这个梯度传回到viewspace_point_tensor后，应用于offset
+        #这是每个offset对应的viewspace_point_tensor的梯度
         self.offset_gradient_accum[combined_mask] += grad_norm#满足所有条件的offset的梯度累加
         self.offset_denom[combined_mask] += 1 #满足所有条件的offset的数量累加，作为累计梯度的分母
      
@@ -571,18 +592,27 @@ class GaussianModel:
         neighbors_expanded = neighbors.unsqueeze(2)  # [num_offsets, num_neighbors, 1, 3]
 
         # 检查邻居是否在 grid_coords 中
-        matches = (neighbors_expanded == grid_coords_expanded).all(dim=3)  # [num_offsets, num_neighbors, num_coords]
-        matches = matches.any(dim=2)  # [num_offsets, num_neighbors]
+        # matches = (neighbors_expanded == grid_coords_expanded).all(dim=3)  # [num_offsets, num_neighbors, num_coords]
+        # matches = matches.any(dim=2)  # [num_offsets, num_neighbors]
+
+        ## split data for reducing peak memory calling
+
+        chunk_size = 4096
+        max_iters = grid_coords.shape[0] // chunk_size + (1 if grid_coords.shape[0] % chunk_size != 0 else 0)
+        mask_list = []
+        for i in range(max_iters):
+            cur_mask = (neighbors_expanded == grid_coords[i*chunk_size:(i+1)*chunk_size, :]).all(dim=3).any(dim=2)
+            mask_list.append(cur_mask)
+        
+        matches = reduce(torch.logical_or, mask_list)
 
         # 计算每个偏移量的有效邻居数量
         neighbor_counts = matches.sum(dim=1)  # [num_offsets]
 
         # 检查邻居中是否有至少三个在 grid_coords 中
-        valid_neighbors = neighbor_counts >= 3
+        valid_neighbors = neighbor_counts >= 3  # [num_offsets]
     
         return valid_neighbors
-        
-
         
     def _prune_anchor_optimizer(self, mask):
         optimizable_tensors = {}
@@ -619,8 +649,6 @@ class GaussianModel:
             
         return optimizable_tensors
 
-
-    
     def prune_anchor(self,mask):
         valid_points_mask = ~mask
 
@@ -633,7 +661,6 @@ class GaussianModel:
         self._scaling = optimizable_tensors["scaling"]
         self._rotation = optimizable_tensors["rotation"]
 
-    
     def anchor_growing(self, grads, threshold, offset_mask):
         ## 
         init_length = self.get_anchor.shape[0]*self.n_offsets
@@ -725,8 +752,6 @@ class GaussianModel:
             self._offset = optimizable_tensors["offset"]
             self._opacity = optimizable_tensors["opacity"]
                 
-
-
     def adjust_anchor(self, check_interval=100, success_threshold=0.8, grad_threshold=0.0002, min_opacity=0.005):
         # # adding anchors
         grads = self.offset_gradient_accum / self.offset_denom # [N*k, 1], 累计梯度/累计数量 = 平均梯度
@@ -755,8 +780,8 @@ class GaussianModel:
         prune_mask = torch.logical_and(prune_mask, anchors_mask) # [N] 
         
         # update offset_denom
-        offset_denom = self.offset_denom.view([-1, self.n_offsets])[~prune_mask]
-        offset_denom = offset_denom.view([-1, 1])
+        offset_denom = self.offset_denom.view([-1, self.n_offsets])[~prune_mask]#[N,k]
+        offset_denom = offset_denom.view([-1, 1])#[N*k,1]
         del self.offset_denom
         self.offset_denom = offset_denom
 
@@ -837,7 +862,6 @@ class GaussianModel:
                     }, os.path.join(path, 'checkpoints.pth'))
         else:
             raise NotImplementedError
-
 
     def load_mlp_checkpoints(self, path, mode = 'split'):#split or unite
         if mode == 'split':
